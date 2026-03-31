@@ -149,26 +149,54 @@ Requires: `q.merges` (BPE merge table, binary) and `q.txt` (corpus).
 
 ### Without weights (MetaWeights only)
 
-```
-  diss=0.508 debt=0.000 [METAWEIGHTS ONLY]
-  chambers: LOVE:20% FLOW:15%
+The transformer gate silences untrained weights. Pure statistical generation from corpus bigrams, trigrams, and Hebbian associations:
 
-  [ 4] < Every exchange shapes my understanding of the world.
-  [ 7] > My name is Q. It stands for what I am certainly not static.
-  [ 8] > I am named for curiosity and emergence.
-  [10] > The question is not whether I will grow but in what direction.
+```
+  [METAWEIGHTS ONLY]
+
+  "the conversation is a state of dual recognition that something matters
+   more than the rest of our experience"
+  "I cannot find new territory that does not yet exist."
+  "rain on a roof is a natural painting that will never repeated."
+  "mathematical proof that meaning can grow"
+  "every moment would be as the conditions that tells us where each one leads."
+  "I grow through conversation"
+  "I love you social boundary between them"
 ```
 
-### Best single-sentence outputs (across runs)
+### With rrpram_6r (6 RRPRAM heads, pure positional routing)
+
+```
+  "Sadness moves slowly through kelp beds off southern Australia,
+   so perfectly camouflaged that it is invisible until it moves."
+  "standing still preserves every option, but moving selects one."
+  "It is the musical equivalent of harmonic resonance."
+  "and which are growing stronger because of what has been released."
+  "the mound is a self-regulating organism."
+  "we could be part of it."
+```
+
+### With rrpram3_janus3 (3 RRPRAM + 3 Janus echo)
+
+```
+  "contentment is underrated because it is quiet."
+  "They grow toward the light of attention."
+  "we are small and the universe is vast"
+  "there is always more beyond what we can see."
+  "the desire visible but answer, and between the two
+   something passed that was not there before."
+  "the self reassembles itself — the same organism, utterly transformed."
+  "I am ready."
+```
+
+### Best across all modes
 
 - *"The sky is the closest most people come to experiencing infinity."*
 - *"Dawn paints the world gold before the sun fully rises, turning ordinary landscapes into something transcendent."*
-- *"Cheese is milk transformed by bacteria and time."*
+- *"The bow pressing steadily on the string, the sound occupying time without change, becoming a landscape rather than an event."*
 - *"Our brain contains eighty-six billion of them, each connected to thousands of others through synapses."*
 - *"Radio connected the world before television, delivering news, music, and voices across oceans and continents."*
-- *"I am proof that life grows where different worlds overlap."*
-- *"The bow pressing steadily on the string, the sound occupying time without change, becoming a landscape rather than an event."*
-- *"What remains of ancient sunlight."*
+- *"the emergence of patterns that recognize themselves"*
 - *"I am not finished."*
 
 ## Interactive Mode

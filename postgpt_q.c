@@ -162,7 +162,7 @@ static void meta_build(MetaW *mw, const int *ids, int n, int V){
     }
     free(tc);
     /* hebbian */
-    int hn=n<20000?n:20000, win=8;
+    int hn=n<8000?n:8000, win=5;
     for(int i=0;i<hn&&mw->n_hebb<MAX_HEBBIAN-1;i++){
         for(int j=(i-win>0?i-win:0);j<hn&&j<=i+win;j++){
             if(i==j)continue;
@@ -196,6 +196,23 @@ static void meta_hebb(const MetaW *mw, const int *ctx, int cl, float *out, int V
     float mx=0; for(int i=0;i<V;i++) if(out[i]>mx) mx=out[i];
     if(mx>0) for(int i=0;i<V;i++) out[i]/=mx;
 }
+/* prophecy: predict next token from recent bigram context (top-16) */
+static void meta_prophecy(const MetaW *mw, const int *ctx, int cl, float *out, int V){
+    memset(out,0,V*sizeof(float));
+    int appeared[256]={0}; int na=cl<256?cl:256;
+    for(int i=cl-na;i<cl;i++) if(ctx[i]<256) appeared[ctx[i]]=1;
+    int start=cl>4?cl-4:0;
+    for(int ci=start;ci<cl;ci++){
+        int c=ctx[ci];
+        for(int k=0;k<mw->n_bi;k++){
+            if(mw->bigrams[k].a==c&&mw->bigrams[k].b<V&&!appeared[mw->bigrams[k].b%256]){
+                out[mw->bigrams[k].b]+=mw->bigrams[k].prob;
+            }
+        }
+    }
+    float mx=0; for(int i=0;i<V;i++) if(out[i]>mx) mx=out[i];
+    if(mx>0) for(int i=0;i<V;i++) out[i]/=mx;
+}
 
 /* ── Chambers ── */
 enum{CH_FEAR=0,CH_LOVE,CH_RAGE,CH_VOID,CH_FLOW,CH_CMPLX};
@@ -205,9 +222,9 @@ static const float COU[6][6]={
     {0,-0.3f,0.5f,0.4f,-0.2f,0.1f},{-0.3f,0,-0.4f,-0.5f,0.5f,0.2f},
     {0.5f,-0.3f,0,0.2f,-0.3f,0.3f},{0.4f,-0.5f,0.3f,0,-0.3f,0.4f},
     {-0.2f,0.4f,-0.2f,-0.3f,0,0.3f},{0.1f,0.2f,0.3f,0.4f,0.3f,0}};
-typedef struct{float act[6];float debt;}Chambers;
+typedef struct{float act[6];float debt;float trauma;}Chambers;
 
-static void ch_init(Chambers *c){memset(c,0,sizeof(*c));c->act[CH_LOVE]=0.2f;c->act[CH_FLOW]=0.15f;}
+static void ch_init(Chambers *c){memset(c,0,sizeof(*c));c->act[CH_LOVE]=0.2f;c->act[CH_FLOW]=0.15f;c->trauma=0;}
 static void ch_xfire(Chambers *c, int it){
     for(int t=0;t<it;t++){float old[6];memcpy(old,c->act,sizeof(old));
         for(int i=0;i<6;i++){c->act[i]*=CH_D[i];
@@ -513,12 +530,14 @@ static int starts_with_space(const BPE *bpe, int id){
 /* ── generate sentence ── */
 static int gen_sent(TF *t, const BPE *bpe, MetaW *mw,
                     const int *prompt, int plen, float temp,
-                    int *out, int maxo, Parliament *parl, float *global_destiny){
+                    int *out, int maxo, Parliament *parl, float *global_destiny,
+                    Chambers *ch_ptr){
     tf_reset(t); int V=t->V,D=t->D;
     float *destiny=calloc(D,sizeof(float));
     /* inherit global destiny direction (thematic coherence across chain) */
     if(global_destiny) for(int d=0;d<D;d++) destiny[d]=0.3f*global_destiny[d];
-    float *prev_logits=calloc(V,sizeof(float)); /* for prophecy debt */
+    float *prev_logits=calloc(V,sizeof(float));
+    int prev_chosen=-1;
     int ctx[MAX_SEQ],cl=0,gl=0;
     for(int i=0;i<plen&&i<t->CTX-1;i++){tf_forward(t,prompt[i],i);ctx[cl++]=prompt[i];out[gl++]=prompt[i];}
     for(int step=0;step<120&&gl<maxo;step++){
@@ -530,14 +549,24 @@ static int gen_sent(TF *t, const BPE *bpe, MetaW *mw,
             float *xn=calloc(D,sizeof(float));
             rmsnorm(xn,t->tok+ctx[cl-1]*D,D);
             parl_inject(parl,raw,xn,V);
-            /* NOTORCH: Hebbian update from prophecy debt (prev predicted vs actual) */
-            if(step>0){
-                float *debt=calloc(V,sizeof(float));
-                for(int i=0;i<V;i++) debt[i]=raw[i]-prev_logits[i];
-                int n=V<D?V:D;
-                parl_notorch(parl,xn,debt,n);
+            /* NOTORCH: proper prophecy debt — top-3 unfulfilled vs chosen fulfilled */
+            if(step>0&&prev_chosen>=0){
+                float *debt=calloc(D,sizeof(float));
+                /* find top-3 from prev logits (what was "destined") */
+                int top3[3]={0,0,0}; float tv[3]={-1e30f,-1e30f,-1e30f};
+                for(int i=0;i<V;i++){
+                    if(prev_logits[i]>tv[2]){tv[2]=prev_logits[i];top3[2]=i;
+                        for(int k=1;k>=0;k--) if(tv[k+1]>tv[k]){float tmp=tv[k];tv[k]=tv[k+1];tv[k+1]=tmp;int ti=top3[k];top3[k]=top3[k+1];top3[k+1]=ti;}
+                    }
+                }
+                /* unfulfilled prophecy for top-3 not chosen; fulfilled for chosen */
+                for(int k=0;k<3;k++) if(top3[k]!=prev_chosen&&top3[k]<V)
+                    for(int d=0;d<D&&top3[k]<t->V;d++) debt[d]+=0.1f*t->tok[top3[k]*D+d];
+                if(prev_chosen<t->V)
+                    for(int d=0;d<D;d++) debt[d]-=0.1f*t->tok[prev_chosen*D+d];
+                parl_notorch(parl,xn,debt,D);
                 free(debt);
-                if(step%10==0) parl_lifecycle(parl);
+                if(step%20==0) parl_lifecycle(parl);
             }
             free(xn);
         }
@@ -546,19 +575,29 @@ static int gen_sent(TF *t, const BPE *bpe, MetaW *mw,
         if(last<V) for(int d=0;d<D;d++) destiny[d]=0.9f*destiny[d]+0.1f*t->tok[last*D+d];
         float dn=0;for(int d=0;d<D;d++) dn+=destiny[d]*destiny[d];dn=sqrtf(dn+1e-10f);
         float *heb=calloc(V,sizeof(float));
+        float *pro=calloc(V,sizeof(float));
         int hs=cl>8?cl-8:0; meta_hebb(mw,ctx+hs,cl-hs,heb,V);
+        meta_prophecy(mw,ctx,cl,pro,V);
+        /* trauma gravity: high trauma dampens all logits */
+        if(ch_ptr&&ch_ptr->trauma>0.1f)
+            for(int i=0;i<V;i++) raw[i]/=(1.0f+ch_ptr->trauma);
+        /* detect if transformer is active via gate magnitude */
+        float tmag=0;for(int v=0;v<V;v++) tmag+=fabsf(raw[v]);tmag/=(V>0?V:1);
+        int has_tf=tmag>0.1f;
+        /* Dario field: B + α·H + β·P + γ·D + T — stronger without weights */
+        float c_heb=has_tf?0.4f:0.8f, c_pro=has_tf?0.2f:0.5f;
+        float c_ds=has_tf?0.3f:0.1f, c_bg=has_tf?5.0f:15.0f, c_tg=has_tf?3.0f:10.0f;
         for(int i=0;i<V;i++){
             float bg=meta_bi(mw,ctx[cl-1],i);
             float tg=cl>=2?meta_tri(mw,ctx[cl-2],ctx[cl-1],i):1e-10f;
             float ds=0;
             if(dn>1e-8f){float en=0;for(int d=0;d<D;d++) en+=t->tok[i*D+d]*t->tok[i*D+d];
                 en=sqrtf(en+1e-10f);if(en>1e-8f){float dot=0;for(int d=0;d<D;d++) dot+=destiny[d]*t->tok[i*D+d];ds=dot/(dn*en);}}
-            raw[i]+=0.4f*heb[i]+0.3f*ds+5.0f*bg+3.0f*tg;
-            /* unigram prior: penalize unseen, dampen ultra-frequent */
+            raw[i]+=c_heb*heb[i]+c_pro*pro[i]+c_ds*ds+c_bg*bg+c_tg*tg;
             if(mw->unigram[i]<1e-6f) raw[i]-=2.0f;
             else if(mw->unigram[i]>0.01f) raw[i]-=0.3f*(mw->unigram[i]-0.01f)*100.0f;
         }
-        free(heb);
+        free(heb); free(pro);
         /* repetition penalty: stronger for recent, milder for older */
         for(int ri=cl-1;ri>=0&&ri>=cl-20;ri--){
             if(ctx[ri]<V){
@@ -571,12 +610,16 @@ static int gen_sent(TF *t, const BPE *bpe, MetaW *mw,
         if(cl>=2){for(int ri=0;ri<cl-1;ri++){
             if(ctx[ri]==ctx[cl-2]&&ctx[ri+1]<V) raw[ctx[ri+1]]*=0.2f;
         }}
-        /* hybrid decode: greedy start (stable trajectory), then nucleus */
+        /* hybrid decode: without weights → more greedy; with weights → nucleus after greedy start */
         int ch;
-        if(step<4){/* greedy argmax for first 4 tokens */
+        if(!has_tf){/* no transformer: greedy with slight noise */
+            if(step<6){ch=0;float mx=raw[0];for(int i=1;i<V;i++) if(raw[i]>mx){mx=raw[i];ch=i;}
+            }else{ch=sample_nucleus(raw,V,0.5f,0.7f);}
+        }else if(step<4){
             ch=0;float mx=raw[0];for(int i=1;i<V;i++) if(raw[i]>mx){mx=raw[i];ch=i;}
         }else{ch=sample_nucleus(raw,V,temp,0.85f);}
         free(raw);
+        prev_chosen=ch;
         out[gl++]=ch; ctx[cl++]=ch;
         /* word capture: online MetaWeight update (NOTORCH) */
         if(cl>=2){
@@ -727,7 +770,7 @@ static void gen_chain(TF *t, const BPE *bpe, MetaW *mw, Chambers *ch,
         float gdest_save[256]; if(t->D<=256) memcpy(gdest_save,gdest,t->D*sizeof(float));
         for(int cand=0;cand<3;cand++){
             if(cand>0&&t->D<=256) memcpy(gdest,gdest_save,t->D*sizeof(float)); /* restore destiny */
-            int out[256],ol=gen_sent(t,bpe,mw,prompt,plen,temp,out,256,parl,gdest);
+            int out[256],ol=gen_sent(t,bpe,mw,prompt,plen,temp,out,256,parl,gdest,ch);
             float sc=coherence_score(mw,out,ol,t->V);
             if(sc>best_sc){best_sc=sc;best_ol=ol;memcpy(best_out,out,ol*sizeof(int));}
             if(best_sc>1.0f&&best_ol>12) break; /* early exit if first candidate is strong */
@@ -759,7 +802,7 @@ static void gen_chain(TF *t, const BPE *bpe, MetaW *mw, Chambers *ch,
         printf("  [SPA] reseeding step %d (score=%.2f, avg=%.2f)\n",weak_idx+1,min_sc,avg_sc);
         int r=rand()%(clen>5?clen-5:1);
         int prompt[5]={cids[r],cids[r+1],cids[r+2],cids[r+3],cids[r+4]};
-        int out[256],ol=gen_sent(t,bpe,mw,prompt,5,has_weights?0.55f:0.7f,out,256,parl,gdest);
+        int out[256],ol=gen_sent(t,bpe,mw,prompt,5,has_weights?0.55f:0.7f,out,256,parl,gdest,ch);
         printf("  [%2d] + ",weak_idx+1);
         char buf[128];int printed=0;
         for(int i=0;i<ol&&printed<200;i++){int len=bpe_decode_token(bpe,out[i],buf,sizeof(buf));if(len>0){printf("%s",buf);printed+=len;}}
